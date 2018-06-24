@@ -10,3 +10,4 @@ class Weight(models.Model):
     animal = models.ForeignKey(Animal, on_delete=models.CASCADE, related_name='weights')
     recorded_weight = models.FloatField()
     recorded_at = models.DateTimeField()
+    estimated = models.BooleanField(default=False)
