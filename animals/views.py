@@ -36,25 +36,36 @@ class EstimatedWeightView(APIView):
 
     def get(self, request, *args, **kwargs):
 
-        # Check for a date query_params. Considered a required field for sake of time.
+        # Check for a date query_params.
         if 'date' not in self.request.query_params:
             return Response({"error": {"Missing timestamp for request."}},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Parse the date from URL into a convertable datetime format.
+        # Parse the date from URL into a convertible datetime format.
         try:
             parsed_request_date = datetime.strptime(
                 self.request.query_params.get('date'),
                 '%Y-%m-%dT%H:%M:%SZ'
             )
-            requested_date = transform_to_unixtime(parsed_request_date.timetuple())
-        except ValueError:
+        except ValueError as e:
             return Response({"error": {"Invalid timestamp format."}},
                             status=status.HTTP_400_BAD_REQUEST)
 
-        # Lookup the weights for our animal, auto-order into ascending by datetime
+        # Find animal and ensure it exists
         animal = get_object_or_404(Animal, pk=self.kwargs.get('pk'))
-        weights = Weight.objects.filter(animal=animal).order_by('recorded_at').all()
+
+        # Look up previously estimated weight in DB, if exists, return that instead of 
+        # running calculations again.
+        # TODO: Recorded at needs to ensure it has proper timezone (UTC)
+        stored_estimated_weight = Weight.objects.filter(animal=animal, 
+                                                        recorded_at=parsed_request_date, 
+                                                        estimated=True)
+
+        if stored_estimated_weight.exists():
+            return Response({'estimated_weight': stored_estimated_weight.recorded_weight})
+
+        # Lookup the weights for our animal, auto-order into ascending by datetime
+        weights = Weight.objects.filter(animal=animal, estimated=False).order_by('recorded_at').all()
 
         if not weights:
             return Response({"estimated_weight": None})
@@ -63,10 +74,10 @@ class EstimatedWeightView(APIView):
         timestamps = []
 
         # Split queryset results into 2 lists for the interp1d function
-        for weigh_record in weights:
-            recorded_weight.append(weigh_record.recorded_weight)
+        for weight_record in weights:
+            recorded_weight.append(weight_record.recorded_weight)
             timestamps.append(
-                transform_to_unixtime(weigh_record.recorded_at)
+                transform_to_unixtime(weight_record.recorded_at)
             )
 
         # Utilize scipy's interpolate function
@@ -76,4 +87,19 @@ class EstimatedWeightView(APIView):
         interpolated_weight = scipy.interpolate.interp1d(timestamps,
                                                          recorded_weight,
                                                          fill_value="extrapolate")
-        return Response({'estimated_weight': interpolated_weight(requested_date)})
+
+        try:
+            requested_date_as_unix = transform_to_unixtime(parsed_request_date)
+            estimated_weight = interpolated_weight(requested_date_as_unix)
+        except Exception as e:
+            return Response({"error": e}, status=status.HTTP_400_BAD_REQUEST)
+
+        # Create an estimated weight record to speed up future requests for same date
+        Weight.objects.create(
+            animal=animal,
+            recorded_at=parsed_request_date,
+            recorded_weight=estimated_weight,
+            estimated=True
+        )
+
+        return Response({'estimated_weight': estimated_weight})
